@@ -19,6 +19,7 @@ import type {
     RealFines,
     ReportType,
     RiskVerdict,
+    RntStatus,
     ScoreBreakdown,
     TechnicalReview,
     VehicleCore,
@@ -41,13 +42,14 @@ export interface TemplateInput {
     domainLimitations: DomainLimitations;
     ownership: OwnershipConsistency;
     marketStats: MarketStats | null;
+    rnt: RntStatus;
 }
 
 const urgencyFromPriority = (p: number): 'immediate' | 'short_term' | 'optional' =>
     p === 1 ? 'immediate' : p <= 3 ? 'short_term' : 'optional';
 
 export function buildTemplateReport(input: TemplateInput): EspiReport {
-    const { vehicle, reportType, score, risk, price, realFines, policeStatus, techReview, mileage, auctions, commercialUse, domainLimitations, ownership, marketStats, negotiationPrice, maxPrice } = input;
+    const { vehicle, reportType, score, risk, price, realFines, policeStatus, techReview, mileage, auctions, commercialUse, domainLimitations, ownership, marketStats, negotiationPrice, maxPrice, rnt } = input;
 
     const keyIssues: string[] = [];
     const redFlags: EspiReport['red_flags'] = [];
@@ -172,6 +174,27 @@ export function buildTemplateReport(input: TemplateInput): EspiReport {
             severity: 'warning',
             description: `${commercialUse.pattern} (${commercialUse.totalFines} multas en ${commercialUse.uniqueMunicipalities} comunas).`,
             recommendation: 'Verificar con el dueño; desgaste acelerado si es taxi/app.',
+        });
+    }
+
+    // ── Transporte público confirmado por RNT (registro oficial MTT) ───────
+    if (rnt?.confirmedCommercialUse) {
+        keyIssues.push(`Transporte público confirmado (RNT${rnt.serviceType ? `: ${rnt.serviceType}` : ''})`);
+        redFlags.push({
+            severity: rnt.credentialsActive ? 'warning' : 'danger',
+            description: `${rnt.summary}. Uso comercial confirmado por registro oficial: desgaste mayor al que sugiere el kilometraje y mercado de reventa más estrecho.${rnt.credentialsActive ? '' : ' Además, las credenciales del servicio/certificado no están vigentes.'}`,
+            recommendation: rnt.credentialsActive
+                ? 'Considerar el uso comercial en la negociación (el valor ya incluye -10% por RNT); verificar condiciones mecánicas propias de vehículos de trabajo.'
+                : 'Verificar estado de credenciales RNT (servicio/certificado) en apps.mtt.cl antes de cualquier transacción.',
+        });
+        recommendations.push({
+            priority: priority++,
+            action: 'Verificar vigencia de credenciales de transporte público (RNT)',
+            reason: rnt.credentialsActive
+                ? 'Vehículo inscrito en el RNT: revisar vencimientos de servicio y certificado ante el MTT'
+                : 'Credenciales RNT no vigentes: condición bloqueante para operar y posible costo de regularización',
+            estimated_cost: 'Consulta gratuita en apps.mtt.cl/consultaweb',
+            urgency: 'short_term',
         });
     }
 

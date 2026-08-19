@@ -117,6 +117,8 @@ export interface VehicleData {
     has_liens?: boolean | null;
     has_prohibitions?: boolean | null;
     has_limitations?: boolean | null;
+    /** Registro Nacional de Transporte Público (MTT) — provisto por splecCore */
+    rnt?: import('./domain/rnt.ts').RntData | null;
     [key: string]: unknown;
 }
 
@@ -210,6 +212,9 @@ export interface AuctionAnalysis {
     date?: string;
 }
 
+/** Registro RNT (MTT) analizado — uso comercial OFICIAL, no heurístico. */
+export type RntStatus = import('./domain/rnt.ts').RntAnalysis;
+
 export interface ScoreBreakdown {
     base: number;
     total: number;
@@ -222,6 +227,8 @@ export interface ScoreBreakdown {
     mileage_intensive_segments?: number;
     auction: number;
     commercial_use: number;
+    /** Penalización por registro RNT positivo (transporte público confirmado) */
+    rnt_public_transport?: number;
     police_cap?: boolean;
     domain_limitation_cap?: boolean;
     domain_limitations?: string[];
@@ -374,6 +381,7 @@ export interface ReportRawData {
     auction_analysis: AuctionAnalysis;
     police_status: PoliceStatus;
     commercial_use: CommercialUseAnalysis;
+    rnt_status: RntStatus;
     domain_limitations: DomainLimitations;
     ownership_consistency: OwnershipConsistency;
 }

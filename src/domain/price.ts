@@ -10,7 +10,9 @@ import type {
     PoliceStatus,
     PriceConfidence,
     PriceResult,
+    RntStatus,
 } from '../types.ts';
+import { RNT_COMMERCIAL_DISCOUNT_PCT } from './rnt.ts';
 
 /** Confianza según cantidad de comparables (≥8 Alta · ≥3 Media · <3 Baja). */
 export function getConfidenceLevel(count: number): PriceConfidence {
@@ -26,8 +28,9 @@ export function calculatePrice(input: {
     policeStatus: PoliceStatus;
     auctionAnalysis: AuctionAnalysis;
     domainLimitations?: DomainLimitations | null;
+    rntStatus?: RntStatus | null;
 }): PriceResult {
-    const { marketStats, mileageAnalysis, policeStatus, auctionAnalysis, domainLimitations } = input;
+    const { marketStats, mileageAnalysis, policeStatus, auctionAnalysis, domainLimitations, rntStatus } = input;
 
     if (!marketStats) {
         return { base: null, adjustments: [], valor_limpio: null, valor_transferible: null, transferible: false, confidence: 'Baja', noData: true };
@@ -63,6 +66,21 @@ export function calculatePrice(input: {
     if (auctionAnalysis?.hasAuction) {
         const amount = Math.round(base * -0.2);
         adjustments.push({ concept: 'Historial remate/siniestro', percentage: '-20%', amount, reason: 'Vehículo con historial de remate o pérdida total' });
+    }
+
+    // Ajuste por uso comercial CONFIRMADO vía RNT (registro oficial MTT).
+    // Vehículo inscrito para transporte público/escolar: desgaste mayor al
+    // que el km sugiere, mercado de reventa más estrecho y exigencias
+    // normativas propias (RT de transporte público). Descuento fijo -10%.
+    if (rntStatus?.confirmedCommercialUse) {
+        const amount = Math.round(base * -RNT_COMMERCIAL_DISCOUNT_PCT);
+        const service = rntStatus.serviceType ? ` (${rntStatus.serviceType})` : '';
+        adjustments.push({
+            concept: 'Uso comercial confirmado (RNT)',
+            percentage: `-${Math.round(RNT_COMMERCIAL_DISCOUNT_PCT * 100)}%`,
+            amount,
+            reason: `Vehículo registrado en el RNT para transporte público/escolar${service} — desgaste y mercado de reventa particulares`,
+        });
     }
 
     const valor_limpio = Math.round(base + adjustments.reduce((s, a) => s + a.amount, 0));

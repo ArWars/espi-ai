@@ -16,6 +16,7 @@ import type {
     RealFines,
     ReportType,
     RiskVerdict,
+    RntStatus,
     ScoreBreakdown,
     TechnicalReview,
     VehicleData,
@@ -63,6 +64,14 @@ SI SE DETECTA USO COMERCIAL:
 - Menciona explícitamente que el patrón de multas sugiere uso como taxi, app de transporte o similar
 - El impacto en el valor debe reflejarse en los ajustes de precio
 
+REGISTRO RNT — TRANSPORTE PÚBLICO (fuente OFICIAL, no heurística):
+- Si rnt_status.confirmedCommercialUse=true, el vehículo está INSCRITO en el Registro Nacional de Transporte Público del MTT: es un hecho registral, no una sospecha
+- En ese caso NO lo describas como "posible uso comercial": es USO COMERCIAL CONFIRMADO (taxi, bus, ambulancia, transporte escolar, etc.)
+- El ajuste "Uso comercial confirmado (RNT)" ya viene aplicado en el precio pre-calculado — explícalo en la narrativa, NO lo dupliques ni lo recalcules
+- Menciona las exigencias normativas propias de estos vehículos (revisión técnica especial, etc.) y su menor valor de reventa
+- Si rnt_status.credentialsActive=false, alerta que las credenciales (servicio/certificado) no están vigentes o están por vencer: verificar antes de comprar
+- Si rnt_status.registered='NO', es un dato TRANQUILIZADOR oficial: menciona que NO está registrado para transporte público (descarta taxi/escolar previo)
+
 HISTORIAL DE KILOMETRAJE (cronología de RT):
 - Recibirás el historial completo de km registrados en cada revisión técnica
 - Si los km BAJAN SIGNIFICATIVAMENTE de una revisión a otra → adulteración de odómetro confirmada
@@ -108,11 +117,12 @@ export interface UserPromptInput {
     maxPrice: number | null;
     domainLimitations: DomainLimitations;
     ownershipConsistency: OwnershipConsistency;
+    rntStatus: RntStatus;
 }
 
 export function buildUserPrompt(inp: UserPromptInput): string {
     const vehicle = inp.vehicleData.vehicle;
-    const { mileageAnalysis, marketStats, comparables, priceResult, domainLimitations, ownershipConsistency, commercialUse, auctionAnalysis, scoreBreakdown, realFines, policeStatus, techReview } = inp;
+    const { mileageAnalysis, marketStats, comparables, priceResult, domainLimitations, ownershipConsistency, commercialUse, auctionAnalysis, scoreBreakdown, realFines, policeStatus, techReview, rntStatus } = inp;
 
     // ── BLOQUE 1: DATOS DEL VEHÍCULO ────────────────────────────────
     let prompt = `═══ DATOS DEL VEHÍCULO ═══
@@ -139,7 +149,12 @@ ESTADO LEGAL:
 - Encargo policial: ${policeStatus.description}
 - Limitaciones al dominio (CAV): ${domainLimitations && domainLimitations.hasBlocking ? domainLimitations.summary : 'Sin limitaciones al dominio'}
 - SOAP: ${inp.vehicleData.soap_status?.status || 'No disponible'}
-- Permiso circulación: ${inp.vehicleData.circulation_permit?.payment_year || 'No disponible'}`;
+- Permiso circulación: ${inp.vehicleData.circulation_permit?.payment_year || 'No disponible'}
+
+TRANSPORTE PÚBLICO (RNT — registro oficial MTT):
+- Registro RNT: ${rntStatus.registered === 'SI' ? 'SI — inscrito' : rntStatus.registered === 'NO' ? 'NO — no inscrito' : 'No consultado'}
+- Detalle: ${rntStatus.summary}
+${rntStatus.confirmedCommercialUse ? '- REGLA: uso comercial CONFIRMADO por registro oficial. Refléjalo en key_issues, red_flags (severity warning si credenciales vigentes, danger si vencidas) y en la interpretación del score. El descuento de precio YA está aplicado.' : ''}`;
 
     // ALERTA CRÍTICA: limitación al dominio
     if (domainLimitations && domainLimitations.hasBlocking) {
@@ -195,6 +210,13 @@ ${domainLimitations.pending.map((p) => `- ${p}`).join('\n')}
     // Uso comercial
     if (commercialUse.flagged) {
         prompt += `\n\n🔍 ATENCIÓN — PATRÓN DE USO COMPATIBLE CON VEHÍCULO COMERCIAL (confianza: ${commercialUse.confidence}):\n- ${commercialUse.totalFines} multas en ${commercialUse.uniqueMunicipalities} comunas distintas\n- Densidad: ${commercialUse.finesPerYear.toFixed(1)} multas/año\n- Indicador: ${commercialUse.pattern}\n- Si se confirma uso comercial, impacto en valor: ${commercialUse.priceImpact}\n- NOTA: Este patrón también puede darse en conductores particulares con muchas infracciones. Se recomienda verificar con el dueño.`;
+    }
+
+    // Transporte público confirmado por RNT (bloque priorizado sobre la heurística)
+    if (rntStatus.confirmedCommercialUse) {
+        prompt += `\n\n🚌 USO COMERCIAL CONFIRMADO — REGISTRO RNT (fuente oficial MTT):\n- ${rntStatus.summary}\n- Estado credenciales: ${rntStatus.credentialsActive ? 'VIGENTES' : 'NO VIGENTES o por vencer — verificar'}\n- Consecuencias para el informe:\n  • key_issues: incluir "Vehículo registrado para transporte público/escolar (RNT)"\n  • red_flag: uso comercial confirmado por registro oficial${rntStatus.credentialsActive ? ' (severity warning)' : ' + credenciales vencidas (severity danger)'}\n  • Narrativa: desgaste mayor al que sugiere el km, mercado de reventa más estrecho, exigencias normativas propias (RT especial, tacógrafo si corresponde)\n  • El descuento "Uso comercial confirmado (RNT)" YA está aplicado en el precio pre-calculado — solo explícalo`;
+    } else if (rntStatus.registered === 'NO') {
+        prompt += `\n\n✅ RNT: vehículo NO registrado para transporte público (dato oficial MTT). Menciónalo como garantía: descarta uso previo como taxi/bus/escolar.`;
     }
 
     // Historial de remate/siniestro
@@ -258,7 +280,7 @@ NO inventes precios ni comparables. Indica al usuario que no hay datos suficient
 Score ESPI pre-calculado: ${scoreBreakdown.total}/100
 Nivel de riesgo (fijo): ${inp.riskLabel}
 Veredicto (fijo): ${inp.verdictLabel}
-Desglose: RT=${scoreBreakdown.technical_review} | Multas Mun=${scoreBreakdown.municipal_fines} | Autopistas=${scoreBreakdown.highway_fines} | Policía=${scoreBreakdown.police_orders} | Docs=${scoreBreakdown.documentation} | Km=${scoreBreakdown.mileage} | Remate=${scoreBreakdown.auction} | Uso Comercial=${scoreBreakdown.commercial_use}
+Desglose: RT=${scoreBreakdown.technical_review} | Multas Mun=${scoreBreakdown.municipal_fines} | Autopistas=${scoreBreakdown.highway_fines} | Policía=${scoreBreakdown.police_orders} | Docs=${scoreBreakdown.documentation} | Km=${scoreBreakdown.mileage} | Remate=${scoreBreakdown.auction} | Uso Comercial=${scoreBreakdown.commercial_use} | RNT Transporte Público=${scoreBreakdown.rnt_public_transport ?? 0}
 
 Tipo de informe: ${inp.reportType.toUpperCase()}
 `;

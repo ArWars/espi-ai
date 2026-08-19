@@ -10,12 +10,13 @@ import { analyzeOwnershipConsistency } from '../src/domain/ownership.ts';
 import { analyzeMileageHistory } from '../src/domain/mileage.ts';
 import { analyzeCommercialUse } from '../src/domain/commercialUse.ts';
 import { analyzeAuctions } from '../src/domain/auctions.ts';
+import { analyzeRnt } from '../src/domain/rnt.ts';
 import { calculateESPIScore } from '../src/domain/score.ts';
 import { riskFromScore } from '../src/domain/risk.ts';
 import { calculatePrice, getConfidenceLevel, negotiationPrices } from '../src/domain/price.ts';
 import { calculateMarketStats } from '../src/market/marketStats.ts';
 import { matchesTargetModel, splitModelVersion } from '../src/market/matching.ts';
-import type { VehicleData } from '../src/types.ts';
+import type { MarketStats, VehicleData } from '../src/types.ts';
 
 // ── Vehículo base para tests ─────────────────────────────────────────────────
 const baseVehicle: VehicleData = {
@@ -421,5 +422,168 @@ describe('matching', () => {
     test('fuzzy leve', () => {
         expect(matchesTargetModel('corolla', 'corolla')).toBe(true);
         expect(matchesTargetModel('corola', 'corolla')).toBe(true); // levenshtein 1
+    });
+});
+
+// ── RNT (transporte público — registro oficial MTT) ─────────────────────────
+describe('rnt', () => {
+    test('sin campo rnt → desconocido, sin flag', () => {
+        const r = analyzeRnt(null);
+        expect(r.registered).toBe(null);
+        expect(r.confirmedCommercialUse).toBe(false);
+    });
+
+    test('public_transport SI → uso comercial CONFIRMADO (caso DWFK11: escolar)', () => {
+        const r = analyzeRnt({
+            public_transport: 'SI',
+            public_transport_type: 'ESCOLAR - URBANO MINIBUS ESCOLAR',
+            rnt_entry_date: '2016-01-07',
+            vehicle_status: 'VIGENTE',
+            certificate_expiry: '2028-02-15',
+            service_type: 'ESCOLAR - URBANO MINIBUS ESCOLAR',
+            service_folio: '302688',
+            service_fleet: '2',
+            operator: 'NOLFA ALVAREZ JARA',
+            service_status: 'VIGENTE',
+            service_expiry: '2030-03-30',
+            region_code: 5,
+            scraped_at: '2026-08-19',
+        });
+        expect(r.registered).toBe('SI');
+        expect(r.confirmedCommercialUse).toBe(true);
+        expect(r.serviceType).toBe('ESCOLAR - URBANO MINIBUS ESCOLAR');
+        expect(r.entryYear).toBe(2016);
+        expect(r.credentialsActive).toBe(true);
+        expect(r.hasExpiredCredentials).toBe(false);
+    });
+
+    test('credenciales vencidas → hasExpiredCredentials', () => {
+        const r = analyzeRnt({
+            public_transport: 'SI',
+            service_type: 'PÚBLICO - URBANO TAXI',
+            service_status: 'VIGENTE',
+            service_expiry: '2020-01-01', // vencido respecto a now fijo
+            vehicle_status: 'VIGENTE',
+            certificate_expiry: '2028-02-15',
+        }, new Date('2026-08-19T00:00:00Z'));
+        expect(r.confirmedCommercialUse).toBe(true);
+        expect(r.hasExpiredCredentials).toBe(true);
+        expect(r.credentialsActive).toBe(false);
+    });
+
+    test('estado NO VIGENTE explícito → expirado aunque falte fecha', () => {
+        const r = analyzeRnt({
+            public_transport: 'SI',
+            service_type: 'ESCOLAR',
+            service_status: 'NO VIGENTE',
+        }, new Date('2026-08-19T00:00:00Z'));
+        expect(r.hasExpiredCredentials).toBe(true);
+    });
+
+    test('public_transport NO → registrado NO, sin flag comercial', () => {
+        const r = analyzeRnt({ public_transport: 'NO' });
+        expect(r.registered).toBe('NO');
+        expect(r.confirmedCommercialUse).toBe(false);
+        expect(r.summary).toContain('No registrado');
+    });
+});
+
+describe('score + price con RNT', () => {
+    const mkScoreInput = (rnt: any) => ({
+        realFines: { highways: { total: 0, count: 0, unpaid: 0, paid: 0 }, municipals: { total: 0, count: 0, source: 'real' as const }, externals: { count: 0, total: 0 }, totalDebt: 0 },
+        techReview: { status: 'APROBADO' },
+        policeStatus: { description: 'Sin encargo policial vigente', penalty: '0' },
+        mileageAnalysis: { rollbackDetected: false, status: 'NORMAL', segments: [], timeline: [] } as any,
+        auctionAnalysis: { hasAuction: false },
+        commercialUse: { flagged: false, confidence: 'baja', finesPerYear: 0 } as any,
+        vehicleData: { vehicle: { plate: 'T', brand: 'B', model: 'M', year: '2012' } } as any,
+        domainLimitations: { transferible: true, hasBlocking: false, items: [], pending: [] } as any,
+        rntStatus: analyzeRnt(rnt),
+    });
+
+    test('RNT SI vigente → penal -18, score 82', () => {
+        const bd = calculateESPIScore(mkScoreInput({
+            public_transport: 'SI',
+            service_type: 'ESCOLAR - URBANO MINIBUS ESCOLAR',
+            service_status: 'VIGENTE',
+            service_expiry: '2030-03-30',
+            vehicle_status: 'VIGENTE',
+            certificate_expiry: '2028-02-15',
+        }));
+        expect(bd.rnt_public_transport).toBe(-18);
+        expect(bd.total).toBe(82);
+    });
+
+    test('RNT con credenciales vencidas → -12', () => {
+        const bd = calculateESPIScore(mkScoreInput({
+            public_transport: 'SI',
+            service_status: 'VIGENTE',
+            service_expiry: '2020-01-01',
+            vehicle_status: 'VIGENTE',
+            certificate_expiry: '2028-02-15',
+        }));
+        expect(bd.rnt_public_transport).toBe(-12);
+        expect(bd.total).toBe(88);
+    });
+
+    test('heurística comercial + RNT → no doble conteo (rige RNT, heurística revertida)', () => {
+        const inp = mkScoreInput({
+            public_transport: 'SI',
+            service_status: 'VIGENTE',
+            service_expiry: '2030-03-30',
+            vehicle_status: 'VIGENTE',
+            certificate_expiry: '2028-02-15',
+        });
+        inp.commercialUse = { flagged: true, finesPerYear: 12 } as any; // heurística -15
+        const bd = calculateESPIScore(inp);
+        expect(bd.commercial_use).toBe(0); // revertida — mismo hecho, un solo descuento
+        expect(bd.rnt_public_transport).toBe(-18);
+        expect(bd.total).toBe(82);
+    });
+
+    test('precio: RNT confirmado → ajuste -10% sobre base', () => {
+        const marketStats: MarketStats = {
+            count: 18,
+            prices: { min: 5_600_000, max: 12_000_000, avg: 8_998_333, median: 8_900_000, trimmedMean: 9_023_125, stdDev: 1_491_648 },
+            mileage: { average: 255_157 },
+        };
+        const price = calculatePrice({
+            marketStats,
+            vehicle: {} as any,
+            mileageAnalysis: { lastKnown: { km: 222_345, date: '2026-02-26' } } as any,
+            policeStatus: { description: 'Sin encargo policial vigente', penalty: '0' } as any,
+            auctionAnalysis: { hasAuction: false } as any,
+            domainLimitations: { hasBlocking: false, transferible: true } as any,
+            rntStatus: analyzeRnt({
+                public_transport: 'SI',
+                service_type: 'ESCOLAR - URBANO MINIBUS ESCOLAR',
+                service_status: 'VIGENTE',
+                service_expiry: '2030-03-30',
+                vehicle_status: 'VIGENTE',
+                certificate_expiry: '2028-02-15',
+            }),
+        });
+        const rntAdj = price.adjustments.find((a) => a.concept.startsWith('Uso comercial confirmado'));
+        expect(rntAdj).toBeDefined();
+        expect(rntAdj!.percentage).toBe('-10%');
+        expect(rntAdj!.amount).toBe(-902_312); // -10% de 9.023.125 (round half-up)
+    });
+
+    test('precio: sin RNT → sin ajuste comercial (regresión: particular intacto)', () => {
+        const marketStats: MarketStats = {
+            count: 18,
+            prices: { min: 1, max: 2, avg: 1.5, median: 1.5, trimmedMean: 9_023_125, stdDev: 1 },
+            mileage: { average: null },
+        };
+        const price = calculatePrice({
+            marketStats,
+            vehicle: {} as any,
+            mileageAnalysis: { lastKnown: null } as any,
+            policeStatus: { description: 'Sin encargo policial vigente', penalty: '0' } as any,
+            auctionAnalysis: { hasAuction: false } as any,
+            domainLimitations: { hasBlocking: false, transferible: true } as any,
+            rntStatus: analyzeRnt(null),
+        });
+        expect(price.adjustments.find((a) => a.concept.startsWith('Uso comercial'))).toBeUndefined();
     });
 });

@@ -9,6 +9,7 @@ import type {
     MileageAnalysis,
     PoliceStatus,
     RealFines,
+    RntStatus,
     ScoreBreakdown,
     TechnicalReview,
     VehicleData,
@@ -23,10 +24,11 @@ interface ScoreInput {
     commercialUse: CommercialUseAnalysis;
     vehicleData: VehicleData;
     domainLimitations: DomainLimitations;
+    rntStatus?: RntStatus;
 }
 
 export function calculateESPIScore(input: ScoreInput): ScoreBreakdown {
-    const { realFines, techReview, policeStatus, mileageAnalysis, auctionAnalysis, commercialUse, vehicleData, domainLimitations } = input;
+    const { realFines, techReview, policeStatus, mileageAnalysis, auctionAnalysis, commercialUse, vehicleData, domainLimitations, rntStatus } = input;
     let score = 100;
     const breakdown: ScoreBreakdown = { base: 100 } as ScoreBreakdown;
 
@@ -146,6 +148,23 @@ export function calculateESPIScore(input: ScoreInput): ScoreBreakdown {
             breakdown.commercial_use = -10;
         }
         score += breakdown.commercial_use;
+    }
+
+    // 9. Transporte público confirmado vía RNT (registro oficial MTT).
+    // Registro positivo = uso comercial de FUENTE OFICIAL (no heurística de
+    // multas). Penalización mayor que la heurística; no se suma con ella
+    // (una misma realidad —uso comercial— se cuenta una sola vez): rige la
+    // penalización más severa.
+    breakdown.rnt_public_transport = 0;
+    if (rntStatus?.confirmedCommercialUse) {
+        const rntPenalty = rntStatus.credentialsActive ? -18 : -12;
+        breakdown.rnt_public_transport = rntPenalty;
+        if (breakdown.commercial_use > rntPenalty) {
+            // La heurística ya descontó: revertir y dejar solo la penal RNT
+            score -= breakdown.commercial_use;
+            breakdown.commercial_use = 0;
+        }
+        score += breakdown.rnt_public_transport;
     }
 
     // FIX-2: cap score at 5 if CON ENCARGO

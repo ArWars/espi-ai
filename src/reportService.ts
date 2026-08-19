@@ -17,6 +17,7 @@ import { analyzeOwnershipConsistency } from './domain/ownership.ts';
 import { analyzeMileageHistory } from './domain/mileage.ts';
 import { analyzeCommercialUse } from './domain/commercialUse.ts';
 import { analyzeAuctions } from './domain/auctions.ts';
+import { analyzeRnt } from './domain/rnt.ts';
 import { calculateESPIScore } from './domain/score.ts';
 import { riskFromScore } from './domain/risk.ts';
 import { calculatePrice, negotiationPrices } from './domain/price.ts';
@@ -73,6 +74,7 @@ export class ReportService {
         const mileageAnalysis = analyzeMileageHistory(vehicleData.technical_review, vehicleData.vehicle);
         const auctionAnalysis = analyzeAuctions(vehicleData.auctions);
         const commercialUse = analyzeCommercialUse(vehicleData.fines);
+        const rntStatus = analyzeRnt(vehicleData.rnt);
         const ownershipConsistency = analyzeOwnershipConsistency(vehicleData);
         const domainLimitations = interpretDomainLimitations(vehicleData);
         const scoreBreakdown = calculateESPIScore({
@@ -84,6 +86,7 @@ export class ReportService {
             commercialUse,
             vehicleData,
             domainLimitations,
+            rntStatus,
         });
 
         const transferible = !policeStatus.description.includes('CON ENCARGO') && domainLimitations.transferible;
@@ -96,6 +99,7 @@ export class ReportService {
             policeStatus,
             auctionAnalysis,
             domainLimitations,
+            rntStatus,
         });
         const { negotiationPrice, maxPrice } = negotiationPrices(priceResult);
 
@@ -117,6 +121,7 @@ export class ReportService {
             domainLimitations,
             ownership: ownershipConsistency,
             marketStats,
+            rnt: rntStatus,
         };
 
         const systemPrompt = buildSystemPrompt();
@@ -139,6 +144,7 @@ export class ReportService {
             maxPrice,
             domainLimitations,
             ownershipConsistency,
+            rntStatus,
         } as Parameters<typeof buildUserPrompt>[0]);
 
         // ── 4. LLM con fallback ──────────────────────────────────────
@@ -163,6 +169,7 @@ export class ReportService {
                 auction_analysis: auctionAnalysis,
                 police_status: policeStatus,
                 commercial_use: commercialUse,
+                rnt_status: rntStatus,
                 domain_limitations: domainLimitations,
                 ownership_consistency: ownershipConsistency,
             },
@@ -175,7 +182,7 @@ export class ReportService {
                 processing_time_ms: processingTime,
                 vehicle_plate: plate,
                 comparables_found: comparables.length,
-                version: 'v1.3-ts',
+                version: 'v1.4-ts',
                 job_id: jobId,
             },
         };
