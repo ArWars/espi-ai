@@ -49,7 +49,7 @@ export function loadConfig(): EspiConfig {
         llm: {
             provider: (process.env.LLM_PROVIDER as EspiConfig['llm']['provider']) || 'gemini',
             geminiApiKey: process.env.GEMINI_API_KEY || '',
-            geminiModel: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+            geminiModel: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
             openaiCompatBaseUrl: process.env.LLM_BASE_URL || 'https://api.openai.com/v1',
             openaiCompatApiKey: process.env.LLM_API_KEY || '',
             openaiCompatModel: process.env.LLM_CHAT_MODEL || 'gpt-4o-mini',

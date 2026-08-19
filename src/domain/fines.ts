@@ -53,11 +53,15 @@ export function calculateRealFines(fines: FinesData | null | undefined): RealFin
                 }
             }
         }
+    }
 
-        // Estimación si no hay montos reales
-        if (municipals.total === 0 && fines?.externals) {
-            const newExternals = fines.externals.filter((f) => f.type === 'new');
-            const uniqueDescriptions = [...new Set(newExternals.map((f) => f.description))];
+    // FIX: Estimación desde externals SIEMPRE que no haya montos reales
+    // (antes estaba atrapado dentro del if(municipalities), así que si
+    //  municipalities era null/undefined, nunca se estimaba — bug RWVZ99)
+    if (municipals.total === 0 && fines?.externals) {
+        const newExternals = fines.externals.filter((f) => f.type === 'new');
+        const uniqueDescriptions = [...new Set(newExternals.map((f) => f.description))];
+        if (uniqueDescriptions.length > 0) {
             municipals = {
                 total: uniqueDescriptions.length * MULTA_MUNICIPAL_ESTIMADA,
                 count: uniqueDescriptions.length,

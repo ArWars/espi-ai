@@ -64,6 +64,28 @@ describe('fines', () => {
         expect(r.municipals.count).toBe(1); // descripción única
         expect(r.municipals.total).toBe(73265);
     });
+
+    test('FIX-RWVZ99: externals estiman aun sin municipalities', () => {
+        // Caso real: municipalities es null/undefined pero hay externals
+        // tipo "new" con multas sin pagar → DEBE estimar
+        const r = calculateRealFines({
+            externals: [
+                { type: 'new', description: 'Infracción señal tránsito 2024' },
+                { type: 'new', description: 'Exceso velocidad 2024' },
+                { type: 'old', description: 'Pagada 2019' },
+            ],
+        });
+        expect(r.municipals.source).toBe('estimated');
+        expect(r.municipals.count).toBe(2);
+        expect(r.municipals.total).toBe(73265 * 2);
+        expect(r.totalDebt).toBe(73265 * 2);
+    });
+
+    test('FIX-RWVZ99: municipalities null + no externals → ceros', () => {
+        const r = calculateRealFines({ municipalities: null });
+        expect(r.municipals.total).toBe(0);
+        expect(r.municipals.count).toBe(0);
+    });
 });
 
 describe('police', () => {
