@@ -175,7 +175,7 @@ export class ReportService {
                 processing_time_ms: processingTime,
                 vehicle_plate: plate,
                 comparables_found: comparables.length,
-                version: 'v3-ts',
+                version: 'v1.3-ts',
                 job_id: jobId,
             },
         };

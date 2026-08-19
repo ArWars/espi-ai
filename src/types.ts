@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// types.ts — Contratos de datos de espi-ai v3
+// types.ts — Contratos de datos de espi-ai
 // Portados 1:1 del lambda legacy (lambda-espi-unified.mjs). Los campos con
 // sufijo `_` o documentados "legacy" existen para no romper clientes actuales.
 // ─────────────────────────────────────────────────────────────────────────────

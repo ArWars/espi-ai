@@ -55,7 +55,7 @@ const queue = createQueueModule(redis);
 const app = createApp({ config, service, queue });
 
 const port = config.port;
-console.log(`[api] espi-ai v3-ts listening on :${port} | llm=${config.llm.provider} | redis db=${config.redis.db}`);
+console.log(`[api] espi-ai v1.3-ts listening on :${port} | llm=${config.llm.provider} | redis db=${config.redis.db}`);
 
 export default {
     port,

@@ -44,7 +44,7 @@ export function createApp(opts: { config: EspiConfig; service: ReportService; qu
     app.get('/health', (c) =>
         c.json({
             status: 'ok',
-            version: 'v3-ts',
+            version: 'v1.3-ts',
             queue: 'espi-reports',
             ts: new Date().toISOString(),
         })

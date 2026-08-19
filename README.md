@@ -1,4 +1,4 @@
-# espi-ai v3
+# espi-ai v1.3
 
 Informe vehicular ESPI (Evaluación de Situación Patrimonial e Incidentes) — reescritura TypeScript del sistema legacy (`lambda-espi-unified.mjs`), con procesamiento **simultáneo de múltiples solicitudes** y arquitectura **multi-réplica** para Cloud Run.
 

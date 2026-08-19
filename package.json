@@ -1,6 +1,6 @@
 {
   "name": "espi-ai",
-  "version": "3.0.0",
+  "version": "1.3.0",
   "description": "ESPI Vehicle Report API — TypeScript, multi-replica BullMQ workers, Gemini/OpenAI-compatible LLM layer, Firestore comparables with Redis cache",
   "type": "module",
   "module": "src/index.ts",
