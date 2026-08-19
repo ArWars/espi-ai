@@ -12,6 +12,7 @@ import { GeminiProvider } from './llm/gemini.ts';
 import { OpenAICompatProvider } from './llm/openaiCompat.ts';
 import { getSharedRedis } from './queue/connection.ts';
 import { createQueueModule } from './queue/jobs.ts';
+import { startWorker } from './worker/worker.ts';
 
 const config = loadConfig();
 const redis = getSharedRedis(config);
@@ -52,6 +53,7 @@ const market = new MarketRepository({
 
 const service = new ReportService({ market, llm: buildLlmRouter(), config });
 const queue = createQueueModule(redis);
+const worker = startWorker({ config, redis, service });
 const app = createApp({ config, service, queue });
 
 const port = config.port;

@@ -1,14 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# CI + Deploy espi-ai a Cloud Run (optimizado)
+# CI + Deploy espi-ai a Cloud Run (Servicio Unificado espi-ia)
 #
-# Pipeline (patrón probado en splecCore):
+# Pipeline:
 #   1. test        — bun install + typecheck + bun test (con cache)
-#   2. docker      — build + push a Artifact Registry (single registry push,
-#                    sin cruces de red innecesarios) y deploy a Cloud Run.
-#
-# Deploy usa Workload Identity Federation (sin keys JSON en secrets).
-# La imagen es liviana (Bun slim + deps solo de runtime) — no necesita base
-# image separada ni buildx cache: el layer de deps ya la cumple.
+#   2. docker      — build + push a Artifact Registry
+#   3. deploy      — deploy a Cloud Run service "espi-ia" (unificado, ingress internal)
 # ─────────────────────────────────────────────────────────────────────────────
 name: CI & Deploy
 
@@ -28,8 +24,7 @@ on:
 env:
   REGISTRY: southamerica-west1-docker.pkg.dev
   REPO: southamerica-west1-docker.pkg.dev/espi-ia-491115/espi-docker
-  SERVICE_API: espi-ai-api
-  SERVICE_WORKER: espi-ai-worker
+  SERVICE: espi-ia
   REGION: southamerica-west1
 
 jobs:
@@ -86,8 +81,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Single push al registry del que Cloud Run deploya. Tag de rama (lo que
-      # deploya Cloud Run) + tag SHA inmutable (trazabilidad), mismo digest.
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
@@ -99,16 +92,14 @@ jobs:
             ${{ env.REPO }}/espi-ai:${{ github.sha }}
           platforms: linux/amd64
           provenance: false
-          # El layer de deps (bun install) ya actúa como cache interno; el
-          # registry cache evita reinstalar deps si package.json no cambió.
           cache-from: type=registry,ref=${{ env.REPO }}/espi-ai:buildcache
           cache-to: type=registry,ref=${{ env.REPO }}/espi-ai:buildcache,mode=max
 
-      # ── API (público, sync + async enqueue) ─────────────────────────────
-      - name: Deploy API to Cloud Run
+      # ── Servicio Unificado espi-ia (API HTTP + BullMQ worker en 1 solo service) ──
+      - name: Deploy espi-ia to Cloud Run
         uses: google-github-actions/deploy-cloudrun@v2
         with:
-          service: ${{ env.SERVICE_API }}
+          service: ${{ env.SERVICE }}
           region: ${{ env.REGION }}
           image: ${{ env.REPO }}/espi-ai:${{ github.ref_name }}
           secrets: |
@@ -119,60 +110,15 @@ jobs:
             REDIS_HOST=${{ vars.REDIS_HOST || '10.1.0.4' }}
             ESPI_REDIS_DB=3
             API_TOKEN=${{ secrets.API_TOKEN }}
-          # La API solo encola/consulta — es liviana. min 0 para costo cero en
-          # reposo; Cloud Run la despierta con el request entrante.
           flags: >-
             --allow-unauthenticated
-            --min-instances=0
-            --max-instances=10
-            --cpu=1
-            --memory=512Mi
-            --timeout=120
-            --concurrency=80
-            --ingress=all
-            --vpc-egress=private-ranges-only
-            --network=splec-vpc
-            --subnet=splec-subnet
-
-      # ── Worker (interno, procesa la cola con N concurrencia por réplica) ──
-      - name: Deploy Worker to Cloud Run
-        uses: google-github-actions/deploy-cloudrun@v2
-        with:
-          service: ${{ env.SERVICE_WORKER }}
-          region: ${{ env.REGION }}
-          image: ${{ env.REPO }}/espi-ai:${{ github.ref_name }}
-          secrets: |
-            GEMINI_API_KEY=espi-gemini-api-key:latest
-            REDIS_PASSWORD=espi-redis-password:latest
-          env_vars: |
-            LLM_PROVIDER=gemini
-            REDIS_HOST=${{ vars.REDIS_HOST || '10.1.0.4' }}
-            ESPI_REDIS_DB=3
-            WORKER_CONCURRENCY=8
-          # --no-cpu-throttling: los jobs son CPU/IO-bound (LLM+Firestore) y el
-          #   lock de BullMQ exige no congelar el proceso a mitad de job.
-          # --concurrency=1: cada request-idle del contenedor corre 1 proceso
-          #   worker; la concurrencia real la pone WORKER_CONCURRENCY.
-          # --ingress=internal: NADIE puede inyectar jobs desde internet; solo
-          #   la API (misma VPC) y el scaler interno.
-          # --vpc-egress=private-ranges-only: Redis 10.1.0.4 via VPC; el resto
-          #   (Gemini API) sale por el egress propio de la réplica.
-          flags: >-
+            --ingress=internal
             --min-instances=0
             --max-instances=20
             --cpu=1
             --memory=1Gi
-            --timeout=600
-            --concurrency=1
-            --no-cpu-throttling
-            --ingress=internal
+            --timeout=120
+            --concurrency=80
             --vpc-egress=private-ranges-only
             --network=splec-vpc
             --subnet=splec-subnet
-            --command=bun
-            --args=run,src/worker/main.ts
-
-      # Nota sobre min-instances=0 del worker: BullMQ no despierta servicios.
-      # Opciones: (a) dejar min=1 en prod real, (b) Cloud Scheduler → curl a un
-      # endpoint /wake del API que escalar el worker, o (c) Pub/Sub trigger.
-      # Para arrancar usamos (a) via workflow_dispatch manual si hace falta.
