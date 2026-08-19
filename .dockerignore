@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.*
+*.log
+.git
+.github
+test
+*.md
+bun.lockb

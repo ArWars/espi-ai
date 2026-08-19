@@ -1,0 +1,16 @@
+{
+  "_comment": "Golden-set de referencia para regresión espi-ai. ref_price = precio de referencia externo (Autofact/venta real). Agregar más casos a medida que se validen.",
+  "mae_threshold_pct": 15,
+  "cases": [
+    {
+      "id": "TFWF67-landtrek-2024",
+      "note": "Caso raíz del doc. Autofact 20.268.000. Gap esperado por mezcla de años/versión (FIX-9 pendiente).",
+      "brand": "PEUGEOT",
+      "model": "Landtrek",
+      "year": "2024",
+      "ref_price": 20268000,
+      "mileage_km": 28000,
+      "police": "clean"
+    }
+  ]
+}
