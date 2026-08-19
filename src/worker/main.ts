@@ -99,6 +99,18 @@ worker.on('error', (err) => {
     console.error('[worker] worker error:', err.message);
 });
 
+// Servidor HTTP liviano para pasar la prueba de salud (health check) de Cloud Run
+const port = parseInt(process.env.PORT || '8080', 10);
+Bun.serve({
+    port,
+    fetch() {
+        return new Response(JSON.stringify({ status: 'ok', role: 'worker', queue: ESPI_QUEUE_NAME }), {
+            headers: { 'content-type': 'application/json' },
+        });
+    },
+});
+console.log(`[worker] health server listening on port ${port}`);
+
 // Graceful shutdown (Cloud Run manda SIGTERM al hacer scale-down)
 const shutdown = async (signal: string) => {
     console.log(`[worker] ${signal} received — closing`);
