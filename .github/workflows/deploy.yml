@@ -122,6 +122,7 @@ jobs:
           # La API solo encola/consulta — es liviana. min 0 para costo cero en
           # reposo; Cloud Run la despierta con el request entrante.
           flags: >-
+            --allow-unauthenticated
             --min-instances=0
             --max-instances=10
             --cpu=1
