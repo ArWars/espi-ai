@@ -72,8 +72,8 @@ jobs:
         id: gcp-auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER || 'projects/502250036715/locations/global/workloadIdentityPools/github-pool/providers/github-provider' }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT || 'github-actions-deployer@espi-ia-491115.iam.gserviceaccount.com' }}
           token_format: access_token
 
       - name: Login to Artifact Registry
