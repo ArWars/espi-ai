@@ -107,7 +107,7 @@ jobs:
             REDIS_PASSWORD=espi-redis-password:latest
           env_vars: |
             LLM_PROVIDER=gemini
-            REDIS_HOST=${{ vars.REDIS_HOST || '192.168.2.137' }}
+            REDIS_HOST=${{ vars.REDIS_HOST || '10.0.0.2' }}
             ESPI_REDIS_DB=3
             API_TOKEN=${{ secrets.API_TOKEN }}
           flags: >-
