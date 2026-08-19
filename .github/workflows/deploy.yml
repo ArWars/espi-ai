@@ -107,7 +107,7 @@ jobs:
             REDIS_PASSWORD=espi-redis-password:latest
           env_vars: |
             LLM_PROVIDER=gemini
-            REDIS_HOST=${{ vars.REDIS_HOST || '10.1.0.4' }}
+            REDIS_HOST=${{ vars.REDIS_HOST || '192.168.2.137' }}
             ESPI_REDIS_DB=3
             API_TOKEN=${{ secrets.API_TOKEN }}
           flags: >-
@@ -119,6 +119,6 @@ jobs:
             --memory=1Gi
             --timeout=120
             --concurrency=80
-            --vpc-egress=private-ranges-only
+            --vpc-egress=all-traffic
             --network=splec-vpc
             --subnet=splec-subnet
