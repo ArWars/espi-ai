@@ -7,3 +7,6 @@ dist/
 .DS_Store
 coverage/
 bun.lockb
+# secrets & local env (nunca al repo)
+.secrets/
+.env.local

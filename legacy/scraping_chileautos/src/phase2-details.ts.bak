@@ -1,0 +1,383 @@
+/**
+ * Phase 2: Vehicle Detail Scraper
+ * Visits each vehicle URL and extracts structured data
+ */
+import * as cheerio from 'cheerio';
+import { config } from './config.js';
+import { fetchWithOxylabs, getWafStats } from './oxylabs.js';
+import { log, sleep, saveCheckpoint, loadCheckpoint, deleteCheckpoint, progressBar } from './utils.js';
+import { FirestoreWriter } from './firestore.js';
+
+export interface VehicleData {
+    vehiculo_id: string;
+    url: string;
+    marca: string;
+    modelo: string;
+    distintivo: string;
+    ano: number;
+    precio_clp: number;
+    kilometraje: string;
+    combustible: string;
+    transmision: string;
+    region: string;
+    comuna: string;
+    ubicacion: string;
+    descripcion: string;
+    titulo_completo: string;
+    vendedor: string;
+    motor: string;
+    consumo: string;
+    version: string;
+    datos_incompletos: boolean;
+}
+
+/**
+ * Parse gallery_meta JavaScript variable from page HTML
+ */
+function parseGalleryMeta(html: string): Record<string, string> | null {
+    const match = html.match(/var\s+gallery_meta\s*=\s*(\{[\s\S]*?\});/);
+    if (!match) return null;
+
+    try {
+        return JSON.parse(match[1]);
+    } catch {
+        // Try fixing common JSON issues (single quotes, trailing commas)
+        try {
+            const fixed = match[1]
+                .replace(/'/g, '"')
+                .replace(/,\s*}/g, '}')
+                .replace(/,\s*]/g, ']');
+            return JSON.parse(fixed);
+        } catch {
+            return null;
+        }
+    }
+}
+
+/**
+ * Extract year from URL as fallback
+ * Handles: /2014-marca-modelo/ and /marca-modelo-2014/
+ */
+function extractYearFromUrl(url: string): number | null {
+    // Try format: /YYYY-brand-model/
+    let match = url.match(/\/(\d{4})-/);
+    if (!match) {
+        // Try format: /brand-model-YYYY/
+        match = url.match(/-(\d{4})\//);
+    }
+    if (match) {
+        const year = parseInt(match[1]);
+        if (year >= 1900 && year <= 2027) return year;
+    }
+    return null;
+}
+
+/**
+ * Extract price from HTML
+ */
+function extractPrice($: cheerio.CheerioAPI): number | null {
+    const priceEl = $('div.price, span.price, .price-value').first();
+    if (!priceEl.length) return null;
+
+    const priceText = priceEl.text().trim();
+    const numericOnly = priceText.replace(/[^\d]/g, '');
+    const price = parseInt(numericOnly);
+
+    return price > 0 ? price : null;
+}
+
+/**
+ * Extract transmission from HTML features
+ */
+function extractTransmission($: cheerio.CheerioAPI): string {
+    // Look for features-item-value with transmission-related class
+    const transEl = $('div[class*="features-item-value"][class*="transmi"]').first();
+    if (!transEl.length) return '';
+
+    let text = transEl.text().trim().replace(/\s+/g, ' ');
+
+    // Validate — should be short and not JavaScript code
+    if (!text || text.length > 30 || text.toLowerCase().includes('function')) return '';
+
+    // Normalize common abbreviations
+    if (text.toUpperCase() === 'M') return 'Manual';
+    if (text.toUpperCase() === 'A') return 'Automática';
+
+    return text;
+}
+
+/**
+ * Extract location/region from breadcrumb or gallery_meta
+ */
+function extractLocation($: cheerio.CheerioAPI, specs: Record<string, string> | null): { region: string; comuna: string } {
+    // Try gallery_meta state field
+    if (specs?.state) {
+        return { region: specs.state, comuna: specs.city || '' };
+    }
+
+    // Try breadcrumb
+    const breadcrumb = $('nav.breadcrumb, .breadcrumb, [class*="breadcrumb"]');
+    if (breadcrumb.length) {
+        const items = breadcrumb.find('a, span, li');
+        const texts: string[] = [];
+        items.each((_, el) => {
+            const t = $(el).text().trim();
+            if (t && t.length > 1) texts.push(t);
+        });
+
+        // Region is usually the 2nd or 3rd breadcrumb item
+        for (const text of texts) {
+            if (text.match(/región|metropolitana|valparaíso|biobío|araucanía|coquimbo/i)) {
+                return { region: text, comuna: '' };
+            }
+        }
+    }
+
+    return { region: '', comuna: '' };
+}
+
+/**
+ * Build description string from available data
+ */
+function buildDescription(data: Partial<VehicleData>): string {
+    const parts: string[] = [];
+    if (data.marca) parts.push(`${data.marca.charAt(0).toUpperCase() + data.marca.slice(1)}`);
+    if (data.modelo) parts.push(data.modelo);
+    if (data.ano) parts.push(`${data.ano}`);
+    const desc = parts.join(' ');
+
+    const extras: string[] = [];
+    if (data.combustible) extras.push(`motor ${data.combustible.toLowerCase()}`);
+    if (data.transmision) extras.push(`transmisión ${data.transmision.toLowerCase()}`);
+    if (data.kilometraje) extras.push(`con ${data.kilometraje}`);
+
+    return extras.length > 0 ? `${desc}. ${extras.join('. ')}.` : desc;
+}
+
+/**
+ * Generate a deterministic vehicle ID from its URL
+ * Uses the ad ID from the URL (e.g., CL-AD-12345) for deduplication
+ */
+function generateVehicleId(url: string, marca: string): string {
+    // Try to extract ChileAutos ad ID
+    const adMatch = url.match(/(CL-AD-\d+|CP-AD-\d+|GI-AD-\d+)/);
+    if (adMatch) {
+        // Use short hash of ad ID for consistency
+        const hash = simpleHash(adMatch[1]);
+        return `${marca}_${hash}`;
+    }
+
+    // Fallback: hash the full URL
+    const hash = simpleHash(url);
+    return `${marca}_${hash}`;
+}
+
+function simpleHash(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; // Convert to 32bit integer
+    }
+    return Math.abs(hash).toString(16).padStart(8, '0').slice(0, 8);
+}
+
+/**
+ * Scrape a single vehicle detail page
+ */
+export async function scrapeVehicleDetail(vehicleUrl: string): Promise<VehicleData | null> {
+    const html = await fetchWithOxylabs(vehicleUrl, { expectedType: 'detail' });
+
+    if (!html) {
+        log('error', `No HTML for ${vehicleUrl.slice(0, 70)}...`);
+        return null;
+    }
+
+    log('debug', `HTML received: ${(html.length / 1024).toFixed(0)} KB`);
+
+    const $ = cheerio.load(html);
+
+    // Parse gallery_meta JavaScript variable
+    const specs = parseGalleryMeta(html);
+
+    // Build vehicle data
+    const marca = (specs?.make || '').toLowerCase();
+    const data: VehicleData = {
+        vehiculo_id: generateVehicleId(vehicleUrl, marca),
+        url: vehicleUrl,
+        marca,
+        modelo: specs?.model || '',
+        distintivo: specs?.badge || '',
+        ano: specs?.year ? parseInt(specs.year) : 0,
+        precio_clp: extractPrice($) || 0,
+        kilometraje: specs?.odometermin || '',
+        combustible: specs?.fuelType || '',
+        transmision: extractTransmission($),
+        vendedor: '',
+        motor: '',
+        consumo: '',
+        version: '',
+        titulo_completo: '',
+        descripcion: '',
+        region: '',
+        comuna: '',
+        ubicacion: '',
+        datos_incompletos: false,
+    };
+
+    // Fallback: year from URL
+    if (!data.ano || data.ano === 0) {
+        const yearFromUrl = extractYearFromUrl(vehicleUrl);
+        if (yearFromUrl) {
+            data.ano = yearFromUrl;
+            log('debug', `Year from URL: ${yearFromUrl}`);
+        }
+    }
+
+    // Extract location
+    const loc = extractLocation($, specs);
+    data.region = loc.region;
+    data.comuna = loc.comuna;
+
+    // Build title and description
+    data.titulo_completo = `${data.marca} ${data.modelo}${data.ano ? ` ${data.ano}` : ''}`;
+    data.descripcion = buildDescription(data);
+
+    // Format kilometraje for consistency
+    if (data.kilometraje && !data.kilometraje.includes('km')) {
+        // Add "km" suffix and format with dots
+        const kmNum = parseInt(data.kilometraje.replace(/[^\d]/g, ''));
+        if (kmNum > 0) {
+            data.kilometraje = `${kmNum.toLocaleString('es-CL')} km`;
+        }
+    }
+
+    // Mark incomplete if critical fields are missing
+    data.datos_incompletos = !data.marca || !data.precio_clp || data.precio_clp === 0;
+
+    return data;
+}
+
+/**
+ * Procesa un lote de URLs de vehículos (Phase 2)
+ * Con dedup: carga URLs existentes de Firestore y salta los ya scrapeados.
+ */
+export async function scrapeVehicleDetails(
+    urls: string[],
+    options: { saveToFirestore?: boolean; batchName?: string } = {}
+): Promise<{ results: VehicleData[]; errors: string[]; skippedDedup: number }> {
+    const { saveToFirestore = true, batchName = 'phase2' } = options;
+
+    const checkpointId = `phase2_${batchName}`;
+    const existing = loadCheckpoint(checkpointId);
+    const processedUrls = new Set<string>(existing?.processedUrls || []);
+
+    // ── Dedup: filtra URLs que ya existen en Firestore ──
+    const firestore = saveToFirestore ? new FirestoreWriter() : null;
+    let existingDbUrls = new Set<string>();
+    let skippedDedup = 0;
+
+    if (firestore) {
+        existingDbUrls = await firestore.loadExistingUrls();
+    }
+
+    // Filter out checkpoint-processed + DynamoDB-existing URLs
+    const pendingUrls = urls.filter(u => {
+        if (processedUrls.has(u)) return false;
+        if (existingDbUrls.has(u)) {
+            skippedDedup++;
+            return false;
+        }
+        return true;
+    });
+
+    log('info', `═══════════════════════════════════════════════════`);
+    log('info', `PHASE 2 — ${urls.length} URLs totales`);
+    if (skippedDedup > 0) {
+        log('info', `🔄 Dedup: ${skippedDedup} ya existen en DB → saltados`);
+    }
+    if (processedUrls.size > 0) {
+        log('info', `📋 Checkpoint: ${processedUrls.size} ya procesados`);
+    }
+    log('info', `🆕 Por scrapear: ${pendingUrls.length} URLs nuevas`);
+    log('info', `═══════════════════════════════════════════════════`);
+
+    if (pendingUrls.length === 0) {
+        log('info', '✅ Nada nuevo por scrapear — todo ya está en Firestore');
+        return { results: [], errors: [], skippedDedup };
+    }
+
+    const results: VehicleData[] = [];
+    const errors: string[] = [];
+    const startTime = Date.now();
+
+    for (let i = 0; i < pendingUrls.length; i++) {
+        const url = pendingUrls[i];
+
+        console.log(`\n${progressBar(i + 1, pendingUrls.length)}`);
+        log('info', `Scraping: ${url.slice(0, 80)}...`);
+
+        try {
+            const data = await scrapeVehicleDetail(url);
+
+            if (data) {
+                results.push(data);
+
+                // Guardar en Firestore inmediatamente
+                if (firestore) {
+                    await firestore.putVehicle(data);
+                }
+
+                // Log extracted fields
+                const fields = [data.marca, data.modelo, data.ano, `$${data.precio_clp?.toLocaleString('es-CL')}`].filter(Boolean);
+                log('info', `→ ${fields.join(' | ')}`);
+            } else {
+                errors.push(url);
+            }
+
+            // Track progress
+            processedUrls.add(url);
+
+            // Save checkpoint every 5 vehicles
+            if ((i + 1) % 5 === 0) {
+                saveCheckpoint(checkpointId, {
+                    phase: 'phase2',
+                    processedUrls: Array.from(processedUrls),
+                    completedCount: processedUrls.size,
+                    totalUrls: urls.length,
+                    updatedAt: new Date().toISOString(),
+                });
+            }
+
+        } catch (err) {
+            log('error', `Exception: ${err instanceof Error ? err.message : String(err)}`);
+            errors.push(url);
+        }
+
+        // Delay between requests (with jitter ±20%)
+        if (i < pendingUrls.length - 1) {
+            const baseDelay = config.scraping.delayBetweenDetailsMs;
+            const jitteredDelay = Math.round(baseDelay + baseDelay * 0.2 * (Math.random() * 2 - 1));
+            await sleep(jitteredDelay);
+        }
+    }
+
+    // Final stats
+    const elapsed = (Date.now() - startTime) / 1000;
+    const rate = results.length / (elapsed / 60);
+
+    log('info', `═══════════════════════════════════════════════════`);
+    log('info', `PHASE 2 COMPLETADA`);
+    log('info', `✅ Procesados: ${results.length}/${pendingUrls.length}`);
+    log('info', `❌ Errores: ${errors.length}`);
+    log('info', `⏱  Tiempo: ${(elapsed / 60).toFixed(1)} min (${rate.toFixed(1)} veh/min)`);
+    if (firestore) {
+        log('info', `💾 Firestore: ${results.length} guardados`);
+    }
+    log('info', `═══════════════════════════════════════════════════`);
+
+    // Clean checkpoint
+    deleteCheckpoint(checkpointId);
+
+    return { results, errors, skippedDedup };
+}

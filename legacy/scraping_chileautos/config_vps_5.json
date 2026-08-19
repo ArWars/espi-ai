@@ -1,0 +1,11 @@
+{
+  "vps_id": 5,
+  "round": 3,
+  "note": "2026-04-06 — Tier 1 grandes",
+  "total_vehicles": 5129,
+  "brands": [
+    { "name": "Toyota", "slug": "toyota", "count": 2320 },
+    { "name": "Mazda", "slug": "mazda", "count": 2046 },
+    { "name": "Chevrolet", "slug": "chevrolet", "count": 5679 }
+  ]
+}

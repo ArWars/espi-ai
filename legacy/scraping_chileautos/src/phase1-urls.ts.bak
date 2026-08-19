@@ -1,0 +1,455 @@
+/**
+ * Phase 1: URL Collector
+ * Paginates ChileAutos listings by brand and extracts vehicle detail URLs.
+ *
+ * Two-level sub-filter cascade for large brands:
+ *   Level 1: Brand → Model  (path-based: /vehiculos/{brand}/{model}/)
+ *   Level 2: Model → Year   (query-based: q=(And..._.Ano.YYYY.))
+ *
+ * This bypasses ChileAutos' ~420-result cap per search query.
+ */
+import * as cheerio from 'cheerio';
+import { config } from './config.js';
+import { fetchWithOxylabs, getWafStats } from './oxylabs.js';
+import { log, sleep, saveCheckpoint, loadCheckpoint, deleteCheckpoint, saveOutput, progressBar } from './utils.js';
+import type { Brand } from './brands.js';
+
+// ─── Constants ───────────────────────────────────────────────────
+
+/** Threshold to trigger model sub-filtering */
+const CAP_THRESHOLD = 400;
+
+/** Year range for sub-filtering when a model also hits the cap */
+const YEAR_MIN = 2000;
+const YEAR_MAX = new Date().getFullYear() + 1; // include next year for pre-orders
+
+/**
+ * Suffixes/patterns for non-model slugs found in the sidebar.
+ * These are filters for color, region, body type, fuel, transmission, seller type.
+ */
+const NON_MODEL_SUFFIXES = [
+    '-color', '-regi', '-carroceria', '-combustible', '-transmisi', '-vendedor',
+];
+
+/**
+ * Known non-model slugs that appear as sidebar links.
+ * Includes truncated region names, colors, body types, etc.
+ */
+const NON_MODEL_SLUGS = new Set([
+    // Transmission / seller type
+    'autom', 'manual', 'particular', 'agencia', 'agencia-vendedor', 'particular-vendedor',
+    // Truncated regions (from ChileAutos sidebar)
+    'araucan', 'tarapac', 'valpara', 'coquimbo', 'ohiggins', 'maule',
+    'los-r', 'los-lagos', 'magallanes-y-ant', 'metropolitana-de-santiago',
+    'arica-y-parinacota', 'atacama', 'biobio', 'nuble',
+    // Truncated colors
+    'marr', 'borgo', 'bordeaux', 'grafito', 'dorado', 'granate',
+    // Truncated body types / fuel
+    'sed', 'coup', 'furg', 'cam', 'b', 'h',
+    'a-motor-carroceria', 'sin-carroceria-carroceria',
+    // Seller/format
+    'advantage', 'horquilla', 'ays',
+]);
+
+export interface Phase1Result {
+    brand: string;
+    slug: string;
+    urls: string[];
+    pagesScraped: number;
+    startedAt: string;
+    completedAt: string;
+}
+
+// ─── URL Extraction Helpers ───────────────────────────────────────
+
+/**
+ * Extract vehicle detail URLs from a listing page HTML
+ */
+function extractUrlsFromPage($: cheerio.CheerioAPI, collectedUrls: Set<string>): number {
+    const items = $('div.listing-item.card');
+    let newOnPage = 0;
+
+    items.each((_, el) => {
+        const link = $(el).find('a[href*="/vehiculos/detalles/"]').first();
+        const href = link.attr('href');
+        if (href) {
+            const cleanHref = href.split('?')[0];
+            const fullUrl = cleanHref.startsWith('http')
+                ? cleanHref
+                : `${config.chileautos.baseUrl}${cleanHref}`;
+
+            if (!collectedUrls.has(fullUrl)) {
+                collectedUrls.add(fullUrl);
+                newOnPage++;
+            }
+        }
+    });
+
+    return newOnPage;
+}
+
+/**
+ * Paginate a listing URL and collect all vehicle detail URLs.
+ * Returns number of pages scraped.
+ */
+async function paginateAndCollect(
+    baseUrl: string,
+    label: string,
+    collectedUrls: Set<string>,
+    maxPages: number,
+): Promise<{ pagesScraped: number; hitCap: boolean }> {
+    let pagesScraped = 0;
+    let totalNewUrls = 0;
+    const MAX_PAGE_RETRIES = 3;
+
+    for (let page = 1; page <= maxPages; page++) {
+        const offset = (page - 1) * 12;
+        const separator = baseUrl.includes('?') ? '&' : '?';
+        const url = `${baseUrl}${separator}offset=${offset}`;
+
+        log('info', `${label} — página ${page} (offset ${offset})...`);
+
+        // Retry same page up to MAX_PAGE_RETRIES times before stopping
+        let html: string | null = null;
+        for (let pageRetry = 1; pageRetry <= MAX_PAGE_RETRIES; pageRetry++) {
+            html = await fetchWithOxylabs(url, { expectedType: 'listing' });
+            if (html) break;
+            if (pageRetry < MAX_PAGE_RETRIES) {
+                const retryDelay = 15_000 + Math.random() * 15_000;
+                log('warn', `${label} — no HTML p.${page} (retry ${pageRetry}/${MAX_PAGE_RETRIES}), waiting ${(retryDelay/1000).toFixed(0)}s...`);
+                await sleep(retryDelay);
+            }
+        }
+
+        if (!html) {
+            log('error', `${label} — no HTML on page ${page} after ${MAX_PAGE_RETRIES} retries, stopping`);
+            break;
+        }
+
+        const $ = cheerio.load(html);
+        const items = $('div.listing-item.card');
+
+        if (items.length === 0) {
+            log('info', `${label} — sin resultados en página ${page} (fin)`);
+            break;
+        }
+
+        const newOnPage = extractUrlsFromPage($, collectedUrls);
+        pagesScraped = page;
+        totalNewUrls += newOnPage;
+        log('info', `${label} — ${items.length} items, ${newOnPage} nuevos (total: ${collectedUrls.size})`);
+
+        if (newOnPage === 0) {
+            log('info', `${label} — no new URLs on page ${page}, reached end`);
+            break;
+        }
+
+        // Delay between pages with jitter ±20%
+        const pageDelay = config.scraping.delayBetweenPagesMs;
+        const jitteredDelay = Math.round(pageDelay + pageDelay * 0.2 * (Math.random() * 2 - 1));
+        await sleep(jitteredDelay);
+    }
+
+    return { pagesScraped, hitCap: totalNewUrls >= CAP_THRESHOLD };
+}
+
+// ─── Model Discovery ──────────────────────────────────────────────
+
+/**
+ * Check if a slug is a real vehicle model (not a filter/region/color)
+ */
+function isValidModelSlug(slug: string, brandSlug: string): boolean {
+    // Skip exact matches to known non-model slugs
+    if (NON_MODEL_SLUGS.has(slug)) return false;
+
+    // Skip slugs ending with non-model suffixes
+    for (const suffix of NON_MODEL_SUFFIXES) {
+        if (slug.endsWith(suffix)) return false;
+    }
+
+    // Skip the brand slug itself
+    if (slug === brandSlug) return false;
+
+    // Skip detail pages
+    if (slug.includes('detalles')) return false;
+
+    // Skip purely numeric slugs (e.g., '2', '1', '2.5')
+    if (/^[\d.]+$/.test(slug)) return false;
+
+    // Skip very short slugs (1-2 chars) — too generic
+    if (slug.length <= 2) return false;
+
+    // Skip industrial/equipment model numbers (e.g., '02-5fg18', '32-8fg20', '7fda50')
+    // Pattern: starts with digits followed by mixed alphanumeric (forklift/truck codes)
+    if (/^\d{1,3}[-]?\d*[a-z]/i.test(slug) && /\d{2,}/.test(slug)) return false;
+
+    return true;
+}
+
+/**
+ * Discover available model slugs for a brand by fetching the brand listing page.
+ * Extracts model links from the sidebar/page links.
+ */
+async function discoverModels(brandSlug: string): Promise<string[]> {
+    const url = `${config.chileautos.baseUrl}/vehiculos/${brandSlug}/`;
+    log('info', `🔍 Discovering models for ${brandSlug}...`);
+
+    const html = await fetchWithOxylabs(url, { expectedType: 'listing' });
+    if (!html) {
+        log('warn', `Could not fetch brand page for ${brandSlug}`);
+        return [];
+    }
+
+    const $ = cheerio.load(html);
+    const modelSlugs = new Set<string>();
+
+    // Extract model slugs from links matching /vehiculos/{brand}/{model}/
+    const pattern = new RegExp(`/vehiculos/${brandSlug}/([a-z0-9][a-z0-9-]*)`, 'i');
+    $('a').each((_, el) => {
+        const href = $(el).attr('href') || '';
+        const match = href.match(pattern);
+        if (match && match[1]) {
+            const slug = match[1].toLowerCase();
+            if (isValidModelSlug(slug, brandSlug)) {
+                modelSlugs.add(slug);
+            }
+        }
+    });
+
+    const models = [...modelSlugs].sort();
+    log('info', `🔍 ${brandSlug}: ${models.length} models found`);
+    if (models.length > 0) {
+        log('info', `   Models: ${models.slice(0, 15).join(', ')}${models.length > 15 ? '...' : ''}`);
+    }
+
+    return models;
+}
+
+// ─── Year Sub-Filter ──────────────────────────────────────────────
+
+/**
+ * When a model hits the cap, scrape it year-by-year using q= filter.
+ * This is Level 2 of the sub-filter cascade.
+ */
+async function scrapeModelByYear(
+    brandName: string,
+    brandSlug: string,
+    modelSlug: string,
+    collectedUrls: Set<string>,
+    label: string,
+): Promise<void> {
+    log('info', `📅 ${label} hit cap, splitting by year (${YEAR_MIN}-${YEAR_MAX})...`);
+
+    for (let year = YEAR_MAX; year >= YEAR_MIN; year--) {
+        const q = encodeURIComponent(
+            `(And.Servicio.chileautos._.Marca.${brandName}._.Ano.${year}.)`
+        );
+        const yearUrl = `${config.chileautos.baseUrl}/vehiculos/${brandSlug}/${modelSlug}/?q=${q}`;
+        const yearLabel = `${label}/año-${year}`;
+
+        const beforeCount = collectedUrls.size;
+        await paginateAndCollect(yearUrl, yearLabel, collectedUrls, config.scraping.maxPagesPerBrand);
+        const added = collectedUrls.size - beforeCount;
+
+        if (added > 0) {
+            log('info', `📅 ${yearLabel}: +${added} URLs`);
+        }
+
+        // Small delay between years
+        await sleep(2000 + Math.random() * 2000);
+    }
+}
+
+// ─── Main Brand Extraction ───────────────────────────────────────
+
+/**
+ * Extract all vehicle URLs for a given brand.
+ * Uses two-level cascade for large brands:
+ *   1. Brand → Model (path-based: /vehiculos/{brand}/{model}/)
+ *   2. Model → Year  (q= filter for models that also hit the cap)
+ */
+export async function extractUrlsByBrand(brand: Brand): Promise<Phase1Result> {
+    const checkpointId = `phase1_${brand.slug}`;
+    const existing = loadCheckpoint(checkpointId);
+
+    let collectedUrls: Set<string> = new Set(existing?.processedUrls || []);
+    const startedAt = existing?.updatedAt || new Date().toISOString();
+
+    if (existing && collectedUrls.size > 0) {
+        log('info', `Resuming ${brand.name} (${collectedUrls.size} URLs cached)`);
+    }
+
+    // ── Step 1: Normal brand-level scraping ──
+    const q = encodeURIComponent(`(And.Servicio.chileautos._.Marca.${brand.name}.)`);
+    const brandUrl = `${config.chileautos.baseUrl}/vehiculos/?q=${q}`;
+    const { pagesScraped, hitCap } = await paginateAndCollect(
+        brandUrl,
+        brand.name,
+        collectedUrls,
+        config.scraping.maxPagesPerBrand,
+    );
+
+    // Save checkpoint after brand-level scrape
+    saveCheckpoint(checkpointId, {
+        phase: 'phase1',
+        brand: brand.slug,
+        lastPage: pagesScraped,
+        processedUrls: Array.from(collectedUrls),
+        totalUrls: collectedUrls.size,
+        updatedAt: new Date().toISOString(),
+    });
+
+    // ── Step 2: If cap hit → model-level sub-filter ──
+    if (hitCap) {
+        log('info', `🔄 ${brand.name} hit cap (${collectedUrls.size} URLs). Switching to model sub-filter...`);
+
+        const models = await discoverModels(brand.slug);
+        if (models.length > 0) {
+            log('info', `🔄 ${brand.name}: scraping ${models.length} models individually...`);
+
+            for (let m = 0; m < models.length; m++) {
+                const modelSlug = models[m];
+                const modelUrl = `${config.chileautos.baseUrl}/vehiculos/${brand.slug}/${modelSlug}/`;
+                const label = `${brand.name}/${modelSlug} [${m + 1}/${models.length}]`;
+
+                const beforeModel = collectedUrls.size;
+                const modelResult = await paginateAndCollect(
+                    modelUrl,
+                    label,
+                    collectedUrls,
+                    config.scraping.maxPagesPerBrand,
+                );
+
+                const modelAdded = collectedUrls.size - beforeModel;
+                log('info', `${label} ✅ — ${modelResult.pagesScraped} pages, +${modelAdded} new (total: ${collectedUrls.size})`);
+
+                // ── Step 3: If THIS model also hit cap → year sub-filter ──
+                if (modelResult.hitCap) {
+                    await scrapeModelByYear(brand.name, brand.slug, modelSlug, collectedUrls, label);
+                }
+
+                // Save checkpoint after each model
+                saveCheckpoint(checkpointId, {
+                    phase: 'phase1',
+                    brand: brand.slug,
+                    lastPage: pagesScraped,
+                    processedUrls: Array.from(collectedUrls),
+                    totalUrls: collectedUrls.size,
+                    currentModel: modelSlug,
+                    modelsCompleted: m + 1,
+                    modelsTotal: models.length,
+                    updatedAt: new Date().toISOString(),
+                });
+
+                // Delay between models
+                if (m < models.length - 1) {
+                    const delay = Math.round(5000 + 3000 * Math.random());
+                    await sleep(delay);
+                }
+            }
+
+            log('info', `🔄 ${brand.name} model sub-filter complete: ${collectedUrls.size} total URLs`);
+        } else {
+            log('warn', `${brand.name}: no models discovered, keeping ${collectedUrls.size} URLs`);
+        }
+
+        // ── Step 3: Year-direct complement to catch remaining URLs ──
+        const beforeYears = collectedUrls.size;
+        log('info', `📅 ${brand.name}: year-direct sweep (${YEAR_MIN}-${YEAR_MAX}) to catch remaining URLs...`);
+
+        for (let year = YEAR_MAX; year >= YEAR_MIN; year--) {
+            const yearQ = encodeURIComponent(
+                `(And.Servicio.chileautos._.Marca.${brand.name}._.Ano.${year}.)`
+            );
+            const yearUrl = `${config.chileautos.baseUrl}/vehiculos/?q=${yearQ}`;
+            const yearLabel = `${brand.name}/año-${year}`;
+
+            const beforeYear = collectedUrls.size;
+            await paginateAndCollect(yearUrl, yearLabel, collectedUrls, config.scraping.maxPagesPerBrand);
+            const yearAdded = collectedUrls.size - beforeYear;
+
+            if (yearAdded > 0) {
+                log('info', `📅 ${yearLabel}: +${yearAdded} new URLs (total: ${collectedUrls.size})`);
+            }
+
+            // Save checkpoint periodically
+            saveCheckpoint(checkpointId, {
+                phase: 'phase1',
+                brand: brand.slug,
+                lastPage: pagesScraped,
+                processedUrls: Array.from(collectedUrls),
+                totalUrls: collectedUrls.size,
+                updatedAt: new Date().toISOString(),
+            });
+
+            // Small delay between years
+            await sleep(2000 + Math.random() * 2000);
+        }
+
+        const yearTotal = collectedUrls.size - beforeYears;
+        log('info', `📅 ${brand.name} year sweep complete: +${yearTotal} new URLs (total: ${collectedUrls.size})`);
+    }
+
+    // ── Final: Save results ──
+    const result: Phase1Result = {
+        brand: brand.name,
+        slug: brand.slug,
+        urls: Array.from(collectedUrls),
+        pagesScraped,
+        startedAt,
+        completedAt: new Date().toISOString(),
+    };
+
+    const filename = `urls_${brand.slug}_${new Date().toISOString().slice(0, 10)}.json`;
+    const filePath = saveOutput(filename, result);
+    log('info', `${brand.name} — ${collectedUrls.size} URLs guardadas → ${filePath}`);
+
+    deleteCheckpoint(checkpointId);
+    return result;
+}
+
+// ─── Multi-Brand Orchestrator ────────────────────────────────────
+
+/**
+ * Extract URLs for multiple brands with delays between them
+ */
+export async function extractUrlsForBrands(brands: Brand[]): Promise<Phase1Result[]> {
+    const results: Phase1Result[] = [];
+
+    log('info', `═══════════════════════════════════════════════════`);
+    log('info', `PHASE 1 — Extracting URLs for ${brands.length} brands`);
+    log('info', `═══════════════════════════════════════════════════`);
+
+    for (let i = 0; i < brands.length; i++) {
+        const brand = brands[i];
+        log('info', progressBar(i + 1, brands.length, brand.name));
+
+        const result = await extractUrlsByBrand(brand);
+        results.push(result);
+
+        log('info', `${brand.name} ✅ — ${result.urls.length} URLs en ${result.pagesScraped} páginas`);
+
+        // Delay between brands (except last one) with jitter
+        if (i < brands.length - 1) {
+            const baseDelay = config.scraping.delayBetweenBrandsMs;
+            const jitteredBrandDelay = Math.round(baseDelay + baseDelay * 0.2 * (Math.random() * 2 - 1));
+            log('info', `⏳ Esperando ${(jitteredBrandDelay / 1000).toFixed(0)}s antes de siguiente marca...`);
+
+            const wafStats = getWafStats();
+            if (wafStats.totalBlocks > 0) {
+                log('warn', `🛡️ WAF stats: ${wafStats.totalBlocks}/${wafStats.totalRequests} blocked (${wafStats.blockRate})`);
+            }
+
+            await sleep(jitteredBrandDelay);
+        }
+    }
+
+    // Summary
+    const totalUrls = results.reduce((sum, r) => sum + r.urls.length, 0);
+    log('info', `═══════════════════════════════════════════════════`);
+    log('info', `PHASE 1 COMPLETADA`);
+    log('info', `Total: ${totalUrls} URLs de ${brands.length} marcas`);
+    log('info', `═══════════════════════════════════════════════════`);
+
+    return results;
+}

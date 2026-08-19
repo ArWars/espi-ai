@@ -1,0 +1,10 @@
+{
+  "vps_id": 4,
+  "round": 3,
+  "note": "2026-04-06 — Tier 1 grandes",
+  "total_vehicles": 5022,
+  "brands": [
+    { "name": "Mercedes-Benz", "slug": "mercedes-benz", "count": 2528 },
+    { "name": "Volkswagen", "slug": "volkswagen", "count": 2494 }
+  ]
+}

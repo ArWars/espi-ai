@@ -1,0 +1,13 @@
+{
+  "vps_id": 6,
+  "round": 2,
+  "note": "2026-04-03 — Marcas grandes Tier-2",
+  "total_vehicles": 6591,
+  "brands": [
+    { "name": "Mitsubishi", "slug": "mitsubishi", "count": 1534 },
+    { "name": "MG", "slug": "mg", "count": 1474 },
+    { "name": "Honda", "slug": "honda", "count": 1276 },
+    { "name": "Subaru", "slug": "subaru", "count": 1182 },
+    { "name": "Chery", "slug": "chery", "count": 1125 }
+  ]
+}

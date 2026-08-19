@@ -1,0 +1,10 @@
+{
+  "vps_id": 2,
+  "round": 3,
+  "note": "2026-04-06 — Tier 1 grandes",
+  "total_vehicles": 6495,
+  "brands": [
+    { "name": "Hyundai", "slug": "hyundai", "count": 3413 },
+    { "name": "Nissan", "slug": "nissan", "count": 3082 }
+  ]
+}
