@@ -12,7 +12,6 @@ RUN bun install --frozen-lockfile --production || bun install --production
 # Código
 COPY src ./src
 COPY tsconfig.json ./
-COPY test ./test
 
 # Sin build step: Bun ejecuta TS directamente. Verificación de tipos la hace CI.
 ENV NODE_ENV=production
